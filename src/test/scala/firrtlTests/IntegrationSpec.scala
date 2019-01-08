@@ -11,6 +11,7 @@ import java.io.File
 class GCDExecutionTest extends ExecutionTest("GCDTester", "/integration")
 class RightShiftExecutionTest extends ExecutionTest("RightShiftTester", "/integration")
 class MemExecutionTest extends ExecutionTest("MemTester", "/integration")
+class PipeExecutionTest extends ExecutionTest("PipeTester", "/integration")
 
 // This is a bit custom some kind of one off
 class GCDSplitEmissionExecutionTest extends FirrtlFlatSpec {
@@ -37,8 +38,8 @@ class GCDSplitEmissionExecutionTest extends FirrtlFlatSpec {
     topFile should exist
 
     // Copy harness over
-    val harness = new File(testDir, s"top.cpp")
-    copyResourceToFile(cppHarness.toString, harness)
+    val harness = new File(testDir, s"testTop.cpp")
+    copyResourceToFile(cppHarnessResourceName, harness)
 
     // topFile will be compiled by Verilator command by default but we need to also include dutFile
     verilogToCpp(top, testDir, Seq(dutFile), harness).!
@@ -47,6 +48,8 @@ class GCDSplitEmissionExecutionTest extends FirrtlFlatSpec {
   }
 }
 
-class RocketCompilationTest extends CompilationTest("rocket", "/regress")
-class BOOMRobCompilationTest extends CompilationTest("Rob", "/regress")
+class RobCompilationTest extends CompilationTest("Rob", "/regress")
+class RocketCoreCompilationTest extends CompilationTest("RocketCore", "/regress")
+class ICacheCompilationTest extends CompilationTest("ICache", "/regress")
+class FPUCompilationTest extends CompilationTest("FPU", "/regress")
 

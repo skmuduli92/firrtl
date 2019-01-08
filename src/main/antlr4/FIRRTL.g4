@@ -88,7 +88,7 @@ simple_reset
 	;
 
 reset_block
-	: INDENT simple_reset NEWLINE DEDENT
+	: INDENT simple_reset info? NEWLINE DEDENT
 	| '(' +  simple_reset + ')'
   ;
 
@@ -324,7 +324,7 @@ RawString
 
 fragment
 UnquotedString
-  : ('\\"'|~[\r\n])+?
+  : ( '\\\'' | '\\"' | ~[\r\n] )+?
   ;
 
 FileInfo
