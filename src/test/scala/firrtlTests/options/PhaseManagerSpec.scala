@@ -182,6 +182,36 @@ object DependentsFixture {
 
 }
 
+object ChainedInvalidationFixture {
+
+  class A extends IdentityPhase {
+    override def invalidates(phase: Phase): Boolean = phase match {
+      case _: B => true
+      case _ => false
+    }
+  }
+  class B extends IdentityPhase {
+    override def invalidates(phase: Phase): Boolean = phase match {
+      case _: C => true
+      case _ => false
+    }
+  }
+  class C extends IdentityPhase {
+    override def invalidates(phase: Phase): Boolean = phase match {
+      case _: D => true
+      case _ => false
+    }
+  }
+  class D extends IdentityPhase {
+    override def invalidates(phase: Phase): Boolean = false
+  }
+  class E extends IdentityPhase {
+    override val prerequisites: Set[Class[Phase]] = Set(classOf[A], classOf[B], classOf[C], classOf[D])
+    override def invalidates(phase: Phase): Boolean = false
+  }
+
+}
+
 class PhaseManagerSpec extends FlatSpec with Matchers {
 
   def writeGraphviz(pm: PhaseManager, dir: String): Unit = {
@@ -334,5 +364,21 @@ class PhaseManagerSpec extends FlatSpec with Matchers {
     writeGraphviz(pmCustom, "test_run_dir/SingleDependent")
 
     pmCustom.flattenedTransformOrder.map(_.asClass) should be (orderCustom)
+  }
+
+  it should "handle chained invalidation" in {
+    val f = ChainedInvalidationFixture
+
+    val targets: Set[Class[Phase]] = Set(classOf[f.A], classOf[f.E])
+      .map(_.asInstanceOf[Class[Phase]])
+    val current: Set[Class[Phase]] = Set(classOf[f.B], classOf[f.C], classOf[f.D]).map(_.asInstanceOf[Class[Phase]])
+
+    val pm = new PhaseManager(targets, current)
+    val order: Seq[Class[Phase]] = Seq( classOf[f.A], classOf[f.B], classOf[f.C], classOf[f.D], classOf[f.E] )
+      .map(_.asInstanceOf[Class[Phase]])
+
+    writeGraphviz(pm, "test_run_dir/ChainedInvalidate")
+
+    pm.flattenedTransformOrder.map(_.asClass) should be (order)
   }
 }

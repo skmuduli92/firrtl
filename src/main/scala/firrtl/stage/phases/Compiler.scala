@@ -4,8 +4,8 @@ package firrtl.stage.phases
 
 import firrtl.{AnnotationSeq, ChirrtlForm, CircuitState, Compiler => FirrtlCompiler, Transform, seqToAnnoSeq}
 import firrtl.options.{Phase, PhasePrerequisiteException, PreservesAll, Translator}
-import firrtl.stage.{CircuitOption, CompilerAnnotation, FirrtlOptions, FirrtlCircuitAnnotation,
-  RunFirrtlTransformAnnotation}
+import firrtl.stage.{CircuitOption, CompilerAnnotation, FirrtlOptions, FirrtlCircuitAnnotation, Forms,
+  RunFirrtlTransformAnnotation, TransformManager}
 
 import scala.collection.mutable
 
@@ -92,15 +92,24 @@ class Compiler extends Phase with Translator[AnnotationSeq, Seq[CompilerRun]] wi
     */
   protected def internalTransform(b: Seq[CompilerRun]): Seq[CompilerRun] = {
     def f(c: CompilerRun): CompilerRun = {
-      val statex = c
-        .compiler
-        .getOrElse { throw new PhasePrerequisiteException("No compiler specified!") }
-        .compile(c.stateIn, c.transforms.reverse)
-      c.copy(stateOut = Some(statex))
+      val targets: Set[Class[Transform]] = c.compiler match {
+        case Some(d) => compilerToTransforms(d) ++ c.transforms.map(_.getClass.asInstanceOf[Class[Transform]])
+        case None    => throw new PhasePrerequisiteException("No compiler specified!") }
+      val tm = new firrtl.stage.transforms.Compiler(targets)
+      c.copy(stateOut = Some(tm.transform(c.stateIn)))
     }
 
     if (b.size <= 1) { b.map(f)         }
-    else             { b.par.map(f).seq }
+    else             { b.map(f).seq }
+  }
+
+  private def compilerToTransforms(a: FirrtlCompiler): Set[Class[Transform]] = a match {
+    case _: firrtl.NoneCompiler                                      => Forms.ChirrtlForm
+    case _: firrtl.HighFirrtlCompiler                                => Forms.HighForm
+    case _: firrtl.MiddleFirrtlCompiler                              => Forms.MidForm
+    case _: firrtl.LowFirrtlCompiler                                 => Forms.LowForm
+    case _: firrtl.VerilogCompiler | _: firrtl.SystemVerilogCompiler => Forms.LowFormOptimized
+    case _: firrtl.MinimumVerilogCompiler                            => Forms.LowFormMinimumOptimized
   }
 
 }

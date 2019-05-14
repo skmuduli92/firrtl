@@ -14,7 +14,8 @@ import firrtl.Utils.{error, throwInternalError}
 import firrtl.annotations.TargetToken
 import firrtl.annotations.TargetToken.{Field, Index}
 import firrtl.annotations.transforms.{EliminateTargetPaths, ResolvePaths}
-import firrtl.options.{StageUtils, TransformLike}
+import firrtl.options.{DependencyAPI, StageUtils, TransformLike}
+import firrtl.stage.transforms.CatchCustomTransformExceptions
 
 /** Container of all annotations for a Firrtl compiler */
 class AnnotationSeq private (private[firrtl] val underlying: List[Annotation]) {
@@ -172,13 +173,20 @@ final case object UnknownForm extends CircuitForm(-1) {
 // scalastyle:on magic.number
 
 /** The basic unit of operating on a Firrtl AST */
-abstract class Transform extends TransformLike[CircuitState] {
+abstract class Transform extends TransformLike[CircuitState] with DependencyAPI[Transform] {
   /** A convenience function useful for debugging and error messages */
   def name: String = this.getClass.getSimpleName
+
   /** The [[firrtl.CircuitForm]] that this transform requires to operate on */
+  @deprecated(
+    "InputForm/OutputForm will be removed. Use DependencyAPI methods (prerequisites, dependents, invalidates)", "1.2")
   def inputForm: CircuitForm
+
   /** The [[firrtl.CircuitForm]] that this transform outputs */
+  @deprecated(
+    "InputForm/OutputForm will be removed. Use DependencyAPI methods (prerequisites, dependents, invalidates)", "1.2")
   def outputForm: CircuitForm
+
   /** Perform the transform, encode renaming with RenameMap, and can
     *   delete annotations
     * Called by [[runTransform]].
@@ -186,9 +194,28 @@ abstract class Transform extends TransformLike[CircuitState] {
     * @param state Input Firrtl AST
     * @return A transformed Firrtl AST
     */
-  protected def execute(state: CircuitState): CircuitState
+  def execute(state: CircuitState): CircuitState
 
   def transform(state: CircuitState): CircuitState = execute(state)
+
+  override def prerequisites: Set[Class[Transform]] =
+    CompilerUtils.circuitFormToTransformSet(inputForm).getOrElse(Set.empty)
+
+  override def dependents: Set[Class[Transform]] = outputForm match {
+    case UnknownForm => Set.empty
+    case _ =>
+      CompilerUtils.circuitFormToEmitterSet(inputForm) ++
+        firrtl.stage.Forms.VerilogOptimized --
+        CompilerUtils.circuitFormToTransformSet(outputForm).getOrElse(Set.empty) --
+        prerequisites -
+        this.getClass.asInstanceOf[Class[Transform]]
+  }
+
+  override def invalidates(a: Transform): Boolean = {
+    val diff = CompilerUtils.circuitFormToTransformSet(inputForm).getOrElse(Set.empty) --
+      CompilerUtils.circuitFormToTransformSet(outputForm).getOrElse(Set.empty)
+    diff(a.getClass.asInstanceOf[Class[Transform]])
+  }
 
   /** Convenience method to get annotations relevant to this Transform
     *
@@ -278,6 +305,18 @@ abstract class Transform extends TransformLike[CircuitState] {
   }
 }
 
+private[firrtl] trait DeprecatedTransformObject { this: Transform =>
+
+  protected def underlying: Transform
+
+  @deprecated("Transform objects are now classes. Create an object or use the Dependency API", "1.2")
+  def execute(c: CircuitState): CircuitState = underlying.execute(c)
+
+  override def inputForm = underlying.inputForm
+  override def outputForm = underlying.outputForm
+
+}
+
 trait SeqTransformBased {
   def transforms: Seq[Transform]
   protected def runTransforms(state: CircuitState): CircuitState =
@@ -337,7 +376,7 @@ object CompilerUtils extends LazyLogging {
         case ChirrtlForm =>
           Seq(new ChirrtlToHighFirrtl) ++ getLoweringTransforms(HighForm, outputForm)
         case HighForm =>
-          Seq(new IRToWorkingIR, new ResolveAndCheck, new transforms.DedupModules,
+          Seq(new IRToWorkingIR, new ResolveAndCheck, new Dedup,
               new HighFirrtlToMiddleFirrtl) ++ getLoweringTransforms(MidForm, outputForm)
         case MidForm => Seq(new MiddleFirrtlToLowFirrtl) ++ getLoweringTransforms(LowForm, outputForm)
         case LowForm => throwInternalError("getLoweringTransforms - LowForm") // should be caught by if above
@@ -393,6 +432,30 @@ object CompilerUtils extends LazyLogging {
     }
   }
 
+  private[firrtl] def circuitFormToTransformSet(a: CircuitForm): Option[Set[Class[Transform]]] = a match {
+    case ChirrtlForm => Some(firrtl.stage.Forms.ChirrtlForm)
+    case HighForm    => Some(firrtl.stage.Forms.HighForm)
+    case MidForm     => Some(firrtl.stage.Forms.MidForm)
+    case LowForm     => Some(firrtl.stage.Forms.LowForm)
+    case UnknownForm => None
+  }
+
+  private[firrtl] def circuitFormToEmitterSet(a: CircuitForm): Set[Class[Transform]] = {
+    val lowEmitters = Set( classOf[LowFirrtlEmitter],
+                           classOf[VerilogEmitter],
+                           classOf[MinimumVerilogEmitter],
+                           classOf[SystemVerilogEmitter] ).asInstanceOf[Set[Class[Transform]]]
+    a match {
+      case ChirrtlForm => Set( classOf[ChirrtlEmitter],
+                               classOf[HighFirrtlEmitter],
+                               classOf[MiddleFirrtlEmitter] ).asInstanceOf[Set[Class[Transform]]] ++ lowEmitters
+      case HighForm    => Set( classOf[HighFirrtlEmitter],
+                               classOf[MiddleFirrtlEmitter] ).asInstanceOf[Set[Class[Transform]]] ++ lowEmitters
+      case MidForm     => lowEmitters + classOf[MiddleFirrtlEmitter].asInstanceOf[Class[Transform]]
+      case LowForm     => lowEmitters
+      case UnknownForm => Set.empty
+    }
+  }
 }
 
 trait Compiler extends LazyLogging {
@@ -458,15 +521,6 @@ trait Compiler extends LazyLogging {
     compile(state.copy(annotations = emitAnno +: state.annotations), emitter +: customTransforms)
   }
 
-  private def isCustomTransform(xform: Transform): Boolean = {
-    def getTopPackage(pack: java.lang.Package): java.lang.Package =
-      Package.getPackage(pack.getName.split('.').head)
-    // We use the top package of the Driver to get the top firrtl package
-    Option(xform.getClass.getPackage).map { p =>
-      getTopPackage(p) != firrtl.Driver.getClass.getPackage
-    }.getOrElse(true)
-  }
-
   /** Perform compilation
     *
     * Emission will only be performed if [[EmitAnnotation]]s are present
@@ -485,7 +539,8 @@ trait Compiler extends LazyLogging {
           xform.runTransform(in)
         } catch {
           // Wrap exceptions from custom transforms so they are reported as such
-          case e: Exception if isCustomTransform(xform) => throw CustomTransformException(e)
+          case e: Exception if CatchCustomTransformExceptions.isCustomTransform(xform) =>
+            throw CustomTransformException(e)
         }
       }
     }

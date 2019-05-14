@@ -17,7 +17,7 @@ import firrtl.annotations._
 import firrtl.Utils.throwInternalError
 import firrtl.graph.{MutableDiGraph,DiGraph}
 import firrtl.analyses.InstanceGraph
-import firrtl.options.{RegisteredTransform, ShellOption}
+import firrtl.options.{PreservesAll, RegisteredTransform, ShellOption}
 import scopt.OptionParser
 
 object CheckCombLoops {
@@ -63,9 +63,14 @@ case class CombinationalPath(sink: ComponentName, sources: Seq[ComponentName]) e
   * @note The pass relies on ExtModulePathAnnotations to find loops through ExtModules
   * @note The pass will throw exceptions on "false paths"
   */
-class CheckCombLoops extends Transform with RegisteredTransform {
+class CheckCombLoops extends Transform with RegisteredTransform with PreservesAll[Transform] {
   def inputForm = LowForm
   def outputForm = LowForm
+
+  override val prerequisites: Set[Class[Transform]] = firrtl.stage.Forms.MidForm ++
+    Set[Class[Transform]]( classOf[passes.LowerTypes],
+                           classOf[passes.Legalize],
+                           classOf[firrtl.transforms.RemoveReset] )
 
   import CheckCombLoops._
 

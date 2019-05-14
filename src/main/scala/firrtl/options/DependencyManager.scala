@@ -13,14 +13,22 @@ case class DependencyManagerException(message: String, cause: Throwable = null) 
 /** A [[TransformLike]] that resolves a linear ordering of dependencies based on requirements.
   * @tparam A the type over which this transforms
   * @tparam B the type of the [[TransformLike]]
-  * @param targets the set of transforms that should be run
-  * @param currentState the set of transforms that have been run
-  * @param knownObjects existing transform objects that have already been constructed
   */
-abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]](
-  val targets: Set[Class[B]],
-  val currentState: Set[Class[B]],
-  val knownObjects: Set[B]) extends TransformLike[A] with DependencyAPI[B]  {
+trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends TransformLike[A] with DependencyAPI[B] {
+
+  /** The set of transforms that should be run */
+  def targets: Set[Class[B]]
+
+  /** The set of transforms that have been run */
+  def currentState: Set[Class[B]]
+
+  /** Existing transform objects that have already been constructed */
+  def knownObjects: Set[B]
+
+  /** A sequence of wrappers to apply to the resulting [[TransformLike]] sequence. This can be used to, e.g., add
+    * automated pre-processing and post-processing.
+    */
+  def wrappers: Seq[(B) => B] = Seq.empty
 
   /** Store of conversions between classes and objects. Objects that do not exist in the map will be lazily constructed.
     */
@@ -92,10 +100,23 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
     DiGraph(edges)
   }
 
-  /** A directed graph consisting of dependent edges */
+  /** A directed graph consisting of prerequisites derived from only those transforms which are supposed to run. This
+    * pulls in dependents for transforms which are not in the target set.
+    */
   private lazy val dependentsGraph: DiGraph[B] = {
     val v = prerequisiteGraph.getVertices
     DiGraph(v.map(vv => vv -> (vv.dependents.map(cToO) & v)).toMap).reverse
+  }
+
+  /** A directed graph consisting of prerequisites derived from ALL targets. This is necessary for defining targets for
+    * [[DependencyManager]] sub-problems.
+    */
+  private lazy val otherDependents: DiGraph[B] = {
+    val edges = targets
+      .map(classToObject)
+      .map( a => a -> prerequisiteGraph.getVertices.filter(a.dependents(_)) )
+      .toMap
+    DiGraph(edges).reverse
   }
 
   /** A directed graph consisting of all prerequisites, including prerequisites derived from dependents */
@@ -113,10 +134,11 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
   }
 
   /** Wrap a possible [[CyclicException]] thrown by a thunk in a [[DependencyManagerException]] */
-  private def cyclePossible[A](a: String, thunk: => A): A = try { thunk } catch {
+  private def cyclePossible[A](a: String, diGraph: DiGraph[_])(thunk: => A): A = try { thunk } catch {
     case e: CyclicException =>
       throw new DependencyManagerException(
-        s"No transform ordering possible due to cyclic dependency in $a at node '${e.node}'.", e)
+        s"""|No transform ordering possible due to cyclic dependency in $a with cycles:
+            |${diGraph.findSCCs.filter(_.size > 1).mkString("    - ", "\n    - ", "")}""".stripMargin, e)
   }
 
   /** Wrap an [[IllegalAccessException]] due to attempted object construction in a [[DependencyManagerException]] */
@@ -124,7 +146,7 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
     case e: IllegalAccessException => throw new DependencyManagerException(
       s"Failed to construct '$a'! (Did you try to construct an object?)", e)
     case e: InstantiationException => throw new DependencyManagerException(
-      s"Failed to construct '$a'! (Did you try to construct an inner class?)" , e)
+      s"Failed to construct '$a'! (Did you try to construct an inner class or a class with parameters?)", e)
   }
 
   /** An ordering of [[TransformLike]]s that causes the requested [[DependencyManager.targets targets]] to be executed
@@ -140,21 +162,23 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
      * reducing (perhaps minimizing?) the number of work re-lowerings.
      */
     val sorted = {
-      val seed = cyclePossible("invalidates", invalidateGraph.linearize).reverse
+      val seed = cyclePossible("invalidates", invalidateGraph){ invalidateGraph.linearize }.reverse
 
-      cyclePossible("prerequisites",
-                    dependencyGraph
-                      .seededLinearize(Some(seed))
-                      .reverse
-                      .dropWhile(b => currentState.contains(b)))
+      cyclePossible("prerequisites/dependents", dependencyGraph) {
+        dependencyGraph
+          .seededLinearize(Some(seed))
+          .reverse
+          .dropWhile(b => currentState.contains(b))
+      }
     }
-
 
     val (state, lowerers) = {
       /* [todo] Seq is inefficient here, but Array has ClassTag problems. Use something else? */
       val (s, l) = sorted.foldLeft((currentState, Seq[B]())){ case ((state, out), in) =>
         /* The prerequisites are both prerequisites AND dependents */
-        val prereqs = in.prerequisites ++ dependencyGraph.getEdges(in).toSet.map(oToC)
+        val prereqs = in.prerequisites ++
+          dependencyGraph.getEdges(in).toSet.map(oToC) ++
+          otherDependents.getEdges(in).toSet.map(oToC)
         val missing = (prereqs -- state)
         val preprocessing: Option[B] = {
           if (missing.nonEmpty) { Some(this.copy(prereqs, state)) }
@@ -186,9 +210,13 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
     case p => Some(p)
   }
 
-  final def transform(annotations: A): A =
-    transformOrder
-      .foldLeft(annotations){ case (a, p) => p.transform(a) }
+  final override def transform(annotations: A): A =
+    flattenedTransformOrder
+      .foldLeft(annotations){ case (a, p) =>
+        wrappers
+          .foldLeft(p){ case (pp, w) => w(pp) }
+          .transform(a)
+      }
 
   /** This colormap uses Colorbrewer's 4-class OrRd color scheme */
   protected val colormap = Seq("#fef0d9", "#fdcc8a", "#fc8d59", "#d7301f")
@@ -250,7 +278,7 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
     val sorted = ArrayBuffer.empty[String]
 
     def rec(pm: DependencyManager[A, B], cm: Seq[String], tab: String = "", id: Int = 0): (String, Int) = {
-      var offset = 0
+      var offset = id
 
       val header = s"""|${tab}subgraph cluster_$id {
                        |$tab  label="target=${pm.targets}, state=${pm.currentState}"
@@ -259,8 +287,8 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
 
       val body = pm.transformOrder.map{
         case a: DependencyManager[A, B] =>
-          val (str, d) = rec(a, rotate(cm), tab + "  ", id + 1 + offset)
-          offset += d
+          val (str, d) = rec(a, rotate(cm), tab + "  ", offset + 1)
+          offset = d
           str
         case a =>
           val name = s"""${transformName(a, "_" + id)}"""
@@ -268,7 +296,7 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
           s"""$tab  $name"""
       }.mkString("\n")
 
-      (Seq(header, body, s"$tab}").mkString("\n"), id + offset)
+      (Seq(header, body, s"$tab}").mkString("\n"), offset)
     }
 
     s"""|digraph DependencyManagerTransformOrder {
@@ -288,10 +316,9 @@ abstract class DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]]
   * @param targets the [[Phase]]s you want to run
   */
 class PhaseManager(
-  targets: Set[Class[Phase]],
-  currentState: Set[Class[Phase]] = Set.empty,
-  knownObjects: Set[Phase] = Set.empty)
-    extends DependencyManager[AnnotationSeq, Phase](targets, currentState, knownObjects) with Phase {
+  val targets: Set[Class[Phase]],
+  val currentState: Set[Class[Phase]] = Set.empty,
+  val knownObjects: Set[Phase] = Set.empty) extends Phase with DependencyManager[AnnotationSeq, Phase] {
 
   protected def copy(a: Set[Class[Phase]], b: Set[Class[Phase]], c: Set[Phase]) = new PhaseManager(a, b, c)
 

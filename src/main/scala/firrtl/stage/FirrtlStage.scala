@@ -3,7 +3,8 @@
 package firrtl.stage
 
 import firrtl.{AnnotationSeq, CustomTransformException, FIRRTLException, Utils}
-import firrtl.options.{Phase, PhaseException, PhaseManager, PreservesAll, Shell, Stage, OptionsException, StageMain}
+import firrtl.options.{DependencyManagerException, Phase, PhaseException, PhaseManager, PreservesAll, Shell, Stage,
+  OptionsException, StageMain}
 import firrtl.options.phases.DeletedWrapper
 import firrtl.passes.{PassException, PassExceptions}
 
@@ -25,7 +26,7 @@ class FirrtlStage extends Stage with PreservesAll[Phase] {
     /* Rethrow the exceptions which are expected or due to the runtime environment (out of memory, stack overflow, etc.).
      * Any UNEXPECTED exceptions should be treated as internal errors. */
     case p @ (_: ControlThrowable | _: PassException | _: PassExceptions | _: FIRRTLException | _: OptionsException
-                | _: PhaseException) => throw p
+                | _: PhaseException | _: DependencyManagerException) => throw p
     case CustomTransformException(cause) => throw cause
     case e: Exception => Utils.throwInternalError(exception = Some(e))
   }

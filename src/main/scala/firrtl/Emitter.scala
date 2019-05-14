@@ -20,7 +20,7 @@ import firrtl.WrappedExpression._
 import Utils._
 import MemPortUtils.{memPortField, memType}
 import firrtl.options.{HasShellOptions, ShellOption, StageUtils, PhaseException}
-import firrtl.stage.RunFirrtlTransformAnnotation
+import firrtl.stage.{RunFirrtlTransformAnnotation, TransformManager}
 import scopt.OptionParser
 // Datastructures
 import scala.collection.mutable.{ArrayBuffer, LinkedHashMap, HashSet}
@@ -185,6 +185,11 @@ case class VRandom(width: BigInt) extends Expression {
 class VerilogEmitter extends SeqTransform with Emitter {
   def inputForm = LowForm
   def outputForm = LowForm
+
+  override def prerequisites: Set[Class[Transform]] = firrtl.stage.Forms.LowFormOptimized
+
+  override def dependents: Set[Class[Transform]] = Set.empty
+
   val outputSuffix = ".v"
   val tab = "  "
   def AND(e1: WrappedExpression, e2: WrappedExpression): Expression = {
@@ -945,16 +950,7 @@ class VerilogEmitter extends SeqTransform with Emitter {
     }
   }
 
-  /** Preamble for every emitted Verilog file */
-  def transforms = Seq(
-    new BlackBoxSourceHelper,
-    new ReplaceTruncatingArithmetic,
-    new FlattenRegUpdate,
-    new DeadCodeElimination,
-    passes.VerilogModulusCleanup,
-    new VerilogRename,
-    passes.VerilogPrep,
-    new AddDescriptionNodes)
+  def transforms = new TransformManager(firrtl.stage.Forms.VerilogOptimized, prerequisites).flattenedTransformOrder
 
   def emit(state: CircuitState, writer: Writer): Unit = {
     val circuit = runTransforms(state).circuit
@@ -1002,16 +998,18 @@ class VerilogEmitter extends SeqTransform with Emitter {
 
 class MinimumVerilogEmitter extends VerilogEmitter with Emitter {
 
+  override def prerequisites: Set[Class[Transform]] = firrtl.stage.Forms.LowFormMinimumOptimized
 
-  override def transforms = super.transforms.filter{
-    case _: DeadCodeElimination => false
-    case _ => true
-  }
+  override def transforms = new TransformManager(firrtl.stage.Forms.VerilogMinimumOptimized, prerequisites)
+    .flattenedTransformOrder
 
 }
 
 class SystemVerilogEmitter extends VerilogEmitter {
-  StageUtils.dramaticWarning("SystemVerilog Emitter is the same as the Verilog Emitter!")
-
   override val outputSuffix: String = ".sv"
+
+  override def execute(state: CircuitState): CircuitState = {
+    StageUtils.dramaticWarning("SystemVerilog Emitter is the same as the Verilog Emitter!")
+    super.execute(state)
+  }
 }
