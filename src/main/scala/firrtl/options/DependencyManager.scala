@@ -18,9 +18,11 @@ trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends 
 
   /** The set of transforms that should be run */
   def targets: Set[Class[B]]
+  private lazy val _targets: LinkedHashSet[Class[B]] = new LinkedHashSet[Class[B]]() ++ targets
 
   /** The set of transforms that have been run */
   def currentState: Set[Class[B]]
+  private lazy val _currentState: LinkedHashSet[Class[B]] = new LinkedHashSet[Class[B]]() ++ currentState
 
   /** Existing transform objects that have already been constructed */
   def knownObjects: Set[B]
@@ -32,9 +34,9 @@ trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends 
 
   /** Store of conversions between classes and objects. Objects that do not exist in the map will be lazily constructed.
     */
-  protected lazy val classToObject: HashMap[Class[B], B] = {
-    val init = HashMap[Class[B], B](knownObjects.map(x => x.getClass.asInstanceOf[Class[B]] -> x).toSeq: _*)
-    (targets ++ currentState)
+  protected lazy val classToObject: LinkedHashMap[Class[B], B] = {
+    val init = LinkedHashMap[Class[B], B](knownObjects.map(x => x.getClass.asInstanceOf[Class[B]] -> x).toSeq: _*)
+    (_targets ++ _currentState)
       .filter(!init.contains(_))
       .map(x => init(x) = safeConstruct(x))
     init
@@ -57,8 +59,8 @@ trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends 
   /** Modified breadth-first search that supports multiple starting nodes and a custom extractor that can be used to
     * generate/filter the edges to explore. Additionally, this will include edges to previously discovered nodes.
     */
-  private def bfs( start: Set[Class[B]],
-                   blacklist: Set[Class[B]],
+  private def bfs( start: LinkedHashSet[Class[B]],
+                   blacklist: LinkedHashSet[Class[B]],
                    extractor: B => Set[Class[B]] ): LinkedHashMap[B, LinkedHashSet[B]] = {
 
     val (queue, edges) = {
@@ -94,9 +96,9 @@ trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends 
   /** A directed graph consisting of prerequisite edges */
   private lazy val prerequisiteGraph: DiGraph[B] = {
     val edges = bfs(
-      start = targets -- currentState,
-      blacklist = currentState,
-      extractor = (p: B) => p.prerequisites -- currentState)
+      start = _targets -- _currentState,
+      blacklist = _currentState,
+      extractor = (p: B) => p.prerequisites -- _currentState)
     DiGraph(edges)
   }
 
@@ -112,7 +114,7 @@ trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends 
     * [[DependencyManager]] sub-problems.
     */
   private lazy val otherDependents: DiGraph[B] = {
-    val edges = targets
+    val edges = _targets
       .map(classToObject)
       .map( a => a -> prerequisiteGraph.getVertices.filter(a.dependents(_)) )
       .toMap
@@ -127,8 +129,8 @@ trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends 
     val v = dependencyGraph.getVertices
     DiGraph(
       bfs(
-        start = targets -- currentState,
-        blacklist = currentState,
+        start = _targets -- _currentState,
+        blacklist = _currentState,
         extractor = (p: B) => v.filter(p.invalidates).map(_.asClass).toSet))
       .reverse
   }
@@ -168,34 +170,34 @@ trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends 
         dependencyGraph
           .seededLinearize(Some(seed))
           .reverse
-          .dropWhile(b => currentState.contains(b))
+          .dropWhile(b => _currentState.contains(b))
       }
     }
 
     val (state, lowerers) = {
       /* [todo] Seq is inefficient here, but Array has ClassTag problems. Use something else? */
-      val (s, l) = sorted.foldLeft((currentState, Seq[B]())){ case ((state, out), in) =>
+      val (s, l) = sorted.foldLeft((_currentState, Seq[B]())){ case ((state, out), in) =>
         /* The prerequisites are both prerequisites AND dependents */
-        val prereqs = in.prerequisites ++
+        val prereqs = new LinkedHashSet() ++ in.prerequisites ++
           dependencyGraph.getEdges(in).toSet.map(oToC) ++
           otherDependents.getEdges(in).toSet.map(oToC)
         val missing = (prereqs -- state)
         val preprocessing: Option[B] = {
-          if (missing.nonEmpty) { Some(this.copy(prereqs, state)) }
+          if (missing.nonEmpty) { Some(this.copy(prereqs.toSet, state.toSet)) }
           else                  { None                                     }
         }
         ((state ++ missing + in).map(cToO).filterNot(in.invalidates).map(oToC), out ++ preprocessing :+ in)
       }
-      val missing = (targets -- s)
+      val missing = (_targets -- s)
       val postprocessing: Option[B] = {
-        if (missing.nonEmpty) { Some(this.copy(targets, s)) }
+        if (missing.nonEmpty) { Some(this.copy(_targets.toSet, s.toSet)) }
         else                  { None                        }
       }
 
       (s ++ missing, l ++ postprocessing)
     }
 
-    if (!targets.subsetOf(state)) {
+    if (!_targets.subsetOf(state)) {
       throw new DependencyManagerException(
         s"The final state ($state) did not include the requested targets (${targets})!")
     }
@@ -281,7 +283,7 @@ trait DependencyManager[A, B <: TransformLike[A] with DependencyAPI[B]] extends 
       var offset = id
 
       val header = s"""|${tab}subgraph cluster_$id {
-                       |$tab  label="target=${pm.targets}, state=${pm.currentState}"
+                       |$tab  label="target=${pm._targets}, state=${pm._currentState}"
                        |$tab  labeljust=r
                        |$tab  node [fillcolor="${cm.head}"]""".stripMargin
 
