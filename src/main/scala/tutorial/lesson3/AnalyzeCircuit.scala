@@ -70,22 +70,21 @@ class AnalyzeCircuit extends Transform {
 
   def walkStatement(ledger: Ledger) (s: Statement): Statement = {
 
+    s match {
+      case r: DefRegister =>
+        println("Register found: " + r.name)
+      case w: DefWire =>
+        println("Defwire : " + w.name)
+      case _ =>
+    }
+
     s map walkExpression(ledger)
 
     s map walkStatement(ledger)
   }
 
   def walkExpression(ledger: Ledger) (e: Expression): Expression = {
-    e match {
-      case m: Mux =>
-        ledger.incrCount()
-//        println(m.serialize)
-      case l: Literal =>
-        println("Literal")
-      case v: ValidIf =>
-        println("Valid-If")
-      case _ =>
-    }
+
 
     e
   }
